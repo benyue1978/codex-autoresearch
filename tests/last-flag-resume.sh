@@ -31,9 +31,7 @@ done
 prompt_payload=${args[$((${#args[@]} - 1))]}
 completion_token=$(printf '%s' "$prompt_payload" | awk -F'`' '/token `/ { print $2 }')
 confirm_text=$(printf '%s' "$prompt_payload" | awk -F'`' '/line 2 = `/ { print $4 }')
-
 printf '%s\n%s\n' "$completion_token" "$confirm_text" > "$output_file"
-
 printf '{"session_id":"%s"}\n' "${TEST_SESSION_ID:?}"
 EOF
 
@@ -44,12 +42,12 @@ FAKE_CODEX_LOG="$FAKE_LOG" \
 TEST_SESSION_ID="$SESSION_ID" \
 STATE_DIR="$STATE_DIR" \
 CODEX_BIN=codex \
-bash "$ROOT_DIR/codex-autoresearch.sh" --session-id "$SESSION_ID"
+bash "$ROOT_DIR/codex-autoresearch.sh" --last
 
 grep -q 'exec resume' "$FAKE_LOG"
-grep -q "$SESSION_ID" "$FAKE_LOG"
+grep -q -- '--last' "$FAKE_LOG"
 
-if grep -qE '^exec --json' "$FAKE_LOG"; then
-  echo "expected resume mode only, but initial exec was invoked" >&2
+if grep -q "$SESSION_ID" "$FAKE_LOG"; then
+  echo "did not expect explicit session id when --last is requested" >&2
   exit 1
 fi

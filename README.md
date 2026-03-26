@@ -7,11 +7,13 @@ This repo contains two end-user tools for running repo-specific autoresearch wit
 
 The design follows the original [karpathy/autoresearch](https://github.com/karpathy/autoresearch) idea: the human defines the research operating rules in `program.md`, and the agent iterates within those rules.
 
+The shell supervisor in this repo was also inspired by [congwa/codex-autoresearch](https://github.com/congwa/codex-autoresearch), which provided the original shell-script direction for wrapping long-running Codex sessions.
+
 ## What To Use When
 
 Use `setup-autoresearch` when you are in a target repository and need to create the first `program.md`.
 
-Use `codex-autoresearch.sh` after `program.md` already exists and you want Codex to keep running autoresearch with minimal supervision.
+Use `codex-autoresearch.sh` either to start a new autoresearch session from a prompt, or to keep resuming an existing session with minimal supervision.
 
 ## Using The Skill
 
@@ -49,22 +51,16 @@ read program.md and begin autoresearch
 
 It does four important things:
 
-1. starts with `codex exec` and then continues with `codex exec resume`
+1. starts with `codex exec` when given a prompt source, then continues with `codex exec resume`
 2. stores the latest Codex message and session metadata in a state directory
 3. prints the last few lines from Codex after each unfinished attempt so you can monitor progress live
-4. stops only when Codex returns the expected completion protocol
+4. stops only when Codex returns the expected completion token and confirmation line
 
-### Basic Run
+If the supervisor is terminated externally with signals like `SIGTERM`, `SIGINT`, or `SIGHUP`, it now logs the signal explicitly before exiting instead of leaving you with only a generic `Terminated`.
 
-Create a prompt file that tells Codex what to do in the target repo. For autoresearch, the prompt will usually point Codex at the generated `program.md`.
+### Start A New Session
 
-Example `prompt.md`:
-
-```text
-read program.md and begin autoresearch
-```
-
-Then run:
+To start a new autoresearch session, pass a prompt source. For example:
 
 ```bash
 WORKDIR=/path/to/target-repo bash /path/to/codex-autoresearch.sh ./prompt.md
@@ -76,6 +72,12 @@ If you prefer stdin:
 printf 'read program.md and begin autoresearch\n' | WORKDIR=/path/to/target-repo bash /path/to/codex-autoresearch.sh -
 ```
 
+Typical prompt content:
+
+```text
+read program.md and begin autoresearch
+```
+
 ### Resume An Existing Session
 
 If you already know the Codex session id:
@@ -84,7 +86,23 @@ If you already know the Codex session id:
 WORKDIR=/path/to/target-repo bash /path/to/codex-autoresearch.sh --session-id 11111111-2222-3333-4444-555555555555
 ```
 
-If you do not pass `--session-id`, the script will try to resume the most recent session for the working directory when possible.
+### Resume The Last Session Explicitly
+
+If you want the wrapper to target the last Codex session in the working directory, say so explicitly:
+
+```bash
+WORKDIR=/path/to/target-repo bash /path/to/codex-autoresearch.sh --last
+```
+
+Resume target selection is explicit. For resume mode, provide either `--session-id` or `--last`.
+
+### Full Auto Mode
+
+If you want native Codex `--full-auto` behavior, use:
+
+```bash
+WORKDIR=/path/to/target-repo bash /path/to/codex-autoresearch.sh --full-auto ./prompt.md
+```
 
 ### Full Permission Mode
 
@@ -96,6 +114,8 @@ WORKDIR=/path/to/target-repo bash /path/to/codex-autoresearch.sh --full-permissi
 
 This passes `--dangerously-bypass-approvals-and-sandbox` to Codex. Use it only when you are comfortable giving Codex unrestricted execution for that run.
 
+`--full-auto` and `--full-permission` are mutually exclusive.
+
 ## Useful Environment Variables
 
 - `WORKDIR`: target repository where Codex should run
@@ -104,7 +124,9 @@ This passes `--dangerously-bypass-approvals-and-sandbox` to Codex. Use it only w
 - `MODEL`: optional Codex model override
 - `PROFILE`: optional Codex profile
 - `MONITOR_LINES`: how many trailing lines from the latest Codex message to print after each unfinished attempt, default `3`
+- `EXECUTION_MODE`: optional fallback mode when no CLI flag is provided, one of `normal`, `full-auto`, or `full-permission`
 - `USE_FULL_AUTO`: whether to pass `--full-auto` by default, `1` unless overridden
+- `DANGEROUSLY_BYPASS`: legacy fallback for full-permission mode
 - `SKIP_GIT_REPO_CHECK`: whether to pass `--skip-git-repo-check`
 
 ## State Files
@@ -125,8 +147,8 @@ Useful files include:
 1. open the target repository in Codex
 2. use `setup-autoresearch` to generate `program.md`
 3. review the inferred setup and confirmation question
-4. either start in-session, or create a prompt containing `read program.md and begin autoresearch`
-5. run `codex-autoresearch.sh` against that target repo
+4. start the autoresearch task with `codex-autoresearch.sh ./prompt.md`
+5. if needed later, resume it with `codex-autoresearch.sh --session-id <uuid>` or `codex-autoresearch.sh --last`
 6. monitor the live 3-line Codex preview while the run continues
 
 ## Tests
@@ -134,8 +156,21 @@ Useful files include:
 This repo currently includes shell tests for the setup skill contract and the supervisor behavior:
 
 ```bash
+bash tests/run-all.sh
+```
+
+The runner currently executes:
+
+```bash
 bash tests/setup-autoresearch-template.sh
+bash tests/full-auto-flag.sh
+bash tests/last-flag-resume.sh
+bash tests/prompt-and-resume-are-mutually-exclusive.sh
+bash tests/resume-flags-are-mutually-exclusive.sh
+bash tests/prompt-mode-ignores-stale-session-id.sh
+bash tests/stale-state-does-not-force-resume.sh
 bash tests/monitor-and-full-permission.sh
 bash tests/resume-with-session-id.sh
+bash tests/termination-signal-is-explicit.sh
 bash tests/readme.sh
 ```

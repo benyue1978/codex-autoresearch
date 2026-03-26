@@ -41,7 +41,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 
 prompt_payload=${args[$((${#args[@]} - 1))]}
-nonce=$(printf '%s' "$prompt_payload" | grep -oE 'nonce `[0-9a-f-]{14}`' | grep -oE '[0-9a-f-]{14}')
+completion_token=$(printf '%s' "$prompt_payload" | awk -F'`' '/token `/ { print $2 }')
 confirm_text=$(printf '%s' "$prompt_payload" | awk -F'`' '/line 2 = `/ { print $4 }')
 
 if [[ "$call_count" == "1" ]]; then
@@ -53,8 +53,7 @@ delta
 epsilon
 MSG
 else
-  IFS='-' read -r a b c <<< "$nonce"
-  printf '%s\n%s\n' "$c-$b-$a" "$confirm_text" > "$output_file"
+  printf '%s\n%s\n' "$completion_token" "$confirm_text" > "$output_file"
 fi
 
 printf '{"session_id":"%s"}\n' "${TEST_SESSION_ID:?}"
@@ -76,3 +75,9 @@ grep -q 'codex says (last 3 lines):' "$STDERR_LOG"
 grep -q 'gamma' "$STDERR_LOG"
 grep -q 'delta' "$STDERR_LOG"
 grep -q 'epsilon' "$STDERR_LOG"
+grep -qE '^exec --json ' "$FAKE_LOG"
+
+if grep -q -- '--full-auto' "$FAKE_LOG"; then
+  echo "did not expect --full-auto when --full-permission is set" >&2
+  exit 1
+fi

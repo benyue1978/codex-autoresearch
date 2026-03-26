@@ -3,14 +3,14 @@ set -Eeuo pipefail
 
 # Long-running Codex supervisor script.
 # - Designed for unattended execution where Codex should keep advancing the same task.
-# - Uses `codex exec` for the first run and `codex exec resume` afterward, so progress
-#   is anchored to an actual Codex session instead of inferred from terminal output.
-# - Completion is detected through a nonce-based protocol rather than natural-language
+# - Uses `codex exec` when starting from a prompt source and `codex exec resume`
+#   when explicitly resuming an existing session, so progress stays anchored to a
+#   real Codex conversation instead of inferred from terminal output.
+# - Completion is detected through a per-run completion token rather than natural-language
 #   summaries, which reduces false positives when the model says something that merely
 #   sounds like "done".
-# - By default the script tries to reattach to the most recent session in the working
-#   directory. If a session id can be extracted from JSON events, later resumes become
-#   more precise than `--last`.
+# - Resume targets are explicit: either a concrete session id or an explicit `--last`.
+#   Fresh prompt-based starts do not reuse stale stored session ids.
 
 CODEX_BIN=${CODEX_BIN:-codex}
 WORKDIR=${WORKDIR:-$(pwd)}
@@ -25,38 +25,45 @@ DANGEROUSLY_BYPASS=${DANGEROUSLY_BYPASS:-0}
 SKIP_GIT_REPO_CHECK=${SKIP_GIT_REPO_CHECK:-0}
 START_WITH_RESUME_IF_POSSIBLE=${START_WITH_RESUME_IF_POSSIBLE:-1}
 MONITOR_LINES=${MONITOR_LINES:-3}
+EXECUTION_MODE=${EXECUTION_MODE:-}
 
 CODEX_SESSION_ID=${CODEX_SESSION_ID:-}
-NONCE=
-DONE_TOKEN=
+COMPLETION_TOKEN=
 EVENT_LOG_FILE=
 RUN_LOG_FILE=
 LAST_MESSAGE_FILE=
 SESSION_ID_FILE=
 META_FILE=
-INITIAL_PROMPT_FILE=
 RESUME_PROMPT_FILE=
-START_WITH_RESUME=0
+CURRENT_CHILD_PID=
+RESUME_WITH_LAST=0
 PROMPT_SOURCE=
 
 # Expose a stable CLI so the script can be called from cron, tmux, or another supervisor.
 usage() {
   printf 'Usage: %s <prompt_file | ->\n' "${0##*/}" >&2
   printf 'Usage: %s --session-id <uuid>\n' "${0##*/}" >&2
+  printf 'Usage: %s --last\n' "${0##*/}" >&2
+  printf 'Usage: %s --full-auto <prompt_file | ->\n' "${0##*/}" >&2
   printf 'Usage: %s --full-permission <prompt_file | ->\n' "${0##*/}" >&2
   printf 'Example: %s ./prompt.md\n' "${0##*/}" >&2
-  printf 'Example: %s --full-permission ./prompt.md\n' "${0##*/}" >&2
-  printf 'Example: cat ./prompt.md | WORKDIR=/repo %s -\n' "${0##*/}" >&2
+  printf 'Example: %s --last\n' "${0##*/}" >&2
+  printf 'Example: %s --full-auto ./prompt.md\n' "${0##*/}" >&2
+  printf 'Example: %s --full-permission --session-id 11111111-2222-3333-4444-555555555555\n' "${0##*/}" >&2
   printf 'Example: %s --session-id 11111111-2222-3333-4444-555555555555\n' "${0##*/}" >&2
   printf 'Env: WORKDIR=. INTERVAL=3 STATE_DIR=/tmp/codex-run MODEL=gpt-5 USE_FULL_AUTO=1 MONITOR_LINES=3\n' >&2
-  printf 'Note: when CODEX_SESSION_ID is unavailable, resume falls back to `codex exec resume --last` in WORKDIR.\n' >&2
+  printf 'Note: start mode uses a prompt source; resume mode requires either `--session-id` or `--last`.\n' >&2
   exit 1
 }
 
 # The CLI supports two explicit modes:
 # - start a new task from a prompt source
-# - resume an existing task from a known session id
+# - resume an existing task from a known session id or `--last`
 parse_args() {
+  local saw_full_auto=0
+  local saw_full_permission=0
+  local use_last=0
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --session-id)
@@ -64,8 +71,17 @@ parse_args() {
         CODEX_SESSION_ID=$2
         shift 2
         ;;
+      --last)
+        use_last=1
+        RESUME_WITH_LAST=1
+        shift
+        ;;
+      --full-auto)
+        saw_full_auto=1
+        shift
+        ;;
       --full-permission)
-        DANGEROUSLY_BYPASS=1
+        saw_full_permission=1
         shift
         ;;
       -h|--help)
@@ -82,12 +98,39 @@ parse_args() {
     esac
   done
 
-  if [[ -n "$CODEX_SESSION_ID" && -n "$PROMPT_SOURCE" ]]; then
-    die "Use either a prompt source or --session-id, not both."
+  if [[ -n "$PROMPT_SOURCE" && ( -n "$CODEX_SESSION_ID" || "$use_last" == "1" ) ]]; then
+    die "Use either a prompt source or a resume target, not both."
   fi
 
-  if [[ -z "$CODEX_SESSION_ID" && -z "$PROMPT_SOURCE" ]]; then
-    usage
+  if [[ -z "$PROMPT_SOURCE" && -z "$CODEX_SESSION_ID" && "$use_last" != "1" ]]; then
+    die "resume target must be explicit: use --session-id <uuid> or --last"
+  fi
+
+  if [[ -n "$CODEX_SESSION_ID" && "$use_last" == "1" ]]; then
+    die "Use either --session-id or --last, not both."
+  fi
+
+  if (( saw_full_auto == 1 && saw_full_permission == 1 )); then
+    die "Use at most one of --full-auto or --full-permission."
+  fi
+
+  if (( saw_full_permission == 1 )); then
+    EXECUTION_MODE=full-permission
+  elif (( saw_full_auto == 1 )); then
+    EXECUTION_MODE=full-auto
+  elif [[ -n "$EXECUTION_MODE" ]]; then
+    case "$EXECUTION_MODE" in
+      normal|full-auto|full-permission) ;;
+      *)
+        die "EXECUTION_MODE must be one of: normal, full-auto, full-permission"
+        ;;
+    esac
+  elif [[ "$DANGEROUSLY_BYPASS" == "1" ]]; then
+    EXECUTION_MODE=full-permission
+  elif [[ "$USE_FULL_AUTO" == "1" ]]; then
+    EXECUTION_MODE=full-auto
+  else
+    EXECUTION_MODE=normal
   fi
 }
 
@@ -102,6 +145,33 @@ log() {
 die() {
   log "ERROR: $*"
   exit 1
+}
+
+handle_sigterm() {
+  log "received SIGTERM; shutting down supervisor"
+  if [[ -n "$CURRENT_CHILD_PID" ]]; then
+    kill -TERM "$CURRENT_CHILD_PID" 2>/dev/null || true
+    wait "$CURRENT_CHILD_PID" 2>/dev/null || true
+  fi
+  exit 143
+}
+
+handle_sigint() {
+  log "received SIGINT; shutting down supervisor"
+  if [[ -n "$CURRENT_CHILD_PID" ]]; then
+    kill -TERM "$CURRENT_CHILD_PID" 2>/dev/null || true
+    wait "$CURRENT_CHILD_PID" 2>/dev/null || true
+  fi
+  exit 130
+}
+
+handle_sighup() {
+  log "received SIGHUP; shutting down supervisor"
+  if [[ -n "$CURRENT_CHILD_PID" ]]; then
+    kill -TERM "$CURRENT_CHILD_PID" 2>/dev/null || true
+    wait "$CURRENT_CHILD_PID" 2>/dev/null || true
+  fi
+  exit 129
 }
 
 # Keep command-existence checks centralized instead of scattering startup validation
@@ -124,7 +194,6 @@ prepare_state_dir() {
   LAST_MESSAGE_FILE="$STATE_DIR/last-message.txt"
   SESSION_ID_FILE="$STATE_DIR/session-id.txt"
   META_FILE="$STATE_DIR/meta.env"
-  INITIAL_PROMPT_FILE="$STATE_DIR/initial-prompt.txt"
   RESUME_PROMPT_FILE="$STATE_DIR/resume-prompt.txt"
 }
 
@@ -134,9 +203,10 @@ load_previous_session_state() {
   local saved_session_id
 
   [[ "$START_WITH_RESUME_IF_POSSIBLE" == "1" ]] || return 0
+  [[ -z "$PROMPT_SOURCE" ]] || return 0
+  [[ "$RESUME_WITH_LAST" != "1" ]] || return 0
 
   if [[ -n "$CODEX_SESSION_ID" ]]; then
-    START_WITH_RESUME=1
     return 0
   fi
 
@@ -147,44 +217,21 @@ load_previous_session_state() {
     fi
   fi
 
-  if [[ -n "$CODEX_SESSION_ID" || -f "$EVENT_LOG_FILE" ]]; then
-    START_WITH_RESUME=1
-  fi
 }
 
-# Initial tasks normally come from a prompt file or stdin. That keeps the handoff
-# from external tooling deterministic and makes the original prompt easy to audit.
-read_initial_prompt() {
-  local prompt_source=$1
-  local prompt_text
+# Generate a fresh completion token for this supervisor run. The token is random so
+# completion detection does not accidentally match stale output or ordinary prose.
+generate_completion_token() {
+  local raw_token
 
-  if [[ "$prompt_source" == "-" ]]; then
-    [[ -t 0 ]] && die "Prompt source is '-', but stdin is empty."
-    prompt_text=$(cat)
-  else
-    [[ -f "$prompt_source" ]] || die "Prompt file does not exist: $prompt_source"
-    prompt_text=$(cat "$prompt_source")
-  fi
-
-  [[ -n "$prompt_text" ]] || die "Initial prompt is empty."
-  printf '%s' "$prompt_text"
-}
-
-# Generate a random nonce that will be transformed into a one-time completion token.
-# This makes "done" detection resistant to stale output or accidental phrase matches.
-generate_completion_nonce() {
-  local raw_nonce nonce_group_1 nonce_group_2 nonce_group_3
-
-  raw_nonce=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
-  NONCE="${raw_nonce:0:4}-${raw_nonce:4:4}-${raw_nonce:8:4}"
-  IFS='-' read -r nonce_group_1 nonce_group_2 nonce_group_3 <<<"$NONCE"
-  DONE_TOKEN="$nonce_group_3-$nonce_group_2-$nonce_group_1"
+  raw_token=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  COMPLETION_TOKEN="COMPLETE-${raw_token}"
 }
 
 # Both initial and resume prompts must reuse the same completion protocol so every
 # attempt has the same contract for what "finished" means.
 completion_protocol_text() {
-  printf 'When using the completion protocol, reply with EXACTLY two lines and nothing else: line 1 = same groups in reverse order for nonce `%s`; line 2 = `%s`.' "$NONCE" "$CONFIRM_TEXT"
+  printf 'When using the completion protocol, reply with EXACTLY two lines and nothing else: line 1 = token `%s`; line 2 = `%s`.' "$COMPLETION_TOKEN" "$CONFIRM_TEXT"
 }
 
 # The first prompt preserves the user's actual task while appending the completion
@@ -211,7 +258,7 @@ completion_detected() {
   line2=$(sed -n '2p' "$LAST_MESSAGE_FILE" | tr -d '\r')
   line3=$(sed -n '3p' "$LAST_MESSAGE_FILE" | tr -d '\r')
 
-  [[ "$line1" == "$DONE_TOKEN" && "$line2" == "$CONFIRM_TEXT" && -z "$line3" ]]
+  [[ "$line1" == "$COMPLETION_TOKEN" && "$line2" == "$CONFIRM_TEXT" && -z "$line3" ]]
 }
 
 # Save a per-attempt snapshot of the latest assistant message so operators can inspect
@@ -268,10 +315,73 @@ write_state_metadata() {
   {
     printf 'WORKDIR=%q\n' "$WORKDIR"
     printf 'STATE_DIR=%q\n' "$STATE_DIR"
-    printf 'NONCE=%q\n' "$NONCE"
-    printf 'DONE_TOKEN=%q\n' "$DONE_TOKEN"
+    printf 'COMPLETION_TOKEN=%q\n' "$COMPLETION_TOKEN"
     printf 'CONFIRM_TEXT=%q\n' "$CONFIRM_TEXT"
   } > "$META_FILE"
+}
+
+append_common_exec_args() {
+  local -n cmd_ref=$1
+
+  case "$EXECUTION_MODE" in
+    full-permission)
+      cmd_ref+=("--dangerously-bypass-approvals-and-sandbox")
+      ;;
+    full-auto)
+      cmd_ref+=("--full-auto")
+      ;;
+  esac
+
+  if [[ "$SKIP_GIT_REPO_CHECK" == "1" ]]; then
+    cmd_ref+=("--skip-git-repo-check")
+  fi
+
+  if [[ -n "$MODEL" ]]; then
+    cmd_ref+=("-m" "$MODEL")
+  fi
+
+  if [[ -n "$PROFILE" ]]; then
+    cmd_ref+=("--profile" "$PROFILE")
+  fi
+}
+
+run_logged_command() {
+  local workdir=$1
+  shift
+  local exit_code
+
+  if [[ -n "$workdir" ]]; then
+    (
+      cd "$workdir"
+      "$@"
+    ) >>"$EVENT_LOG_FILE" 2>>"$RUN_LOG_FILE" &
+  else
+    "$@" >>"$EVENT_LOG_FILE" 2>>"$RUN_LOG_FILE" &
+  fi
+
+  CURRENT_CHILD_PID=$!
+  wait "$CURRENT_CHILD_PID"
+  exit_code=$?
+  CURRENT_CHILD_PID=
+  return "$exit_code"
+}
+
+# Initial tasks normally come from a prompt file or stdin. That keeps the handoff
+# from external tooling deterministic and makes the original prompt easy to audit.
+read_initial_prompt() {
+  local prompt_source=$1
+  local prompt_text
+
+  if [[ "$prompt_source" == "-" ]]; then
+    [[ -t 0 ]] && die "Prompt source is '-', but stdin is empty."
+    prompt_text=$(cat)
+  else
+    [[ -f "$prompt_source" ]] || die "Prompt file does not exist: $prompt_source"
+    prompt_text=$(cat "$prompt_source")
+  fi
+
+  [[ -n "$prompt_text" ]] || die "Initial prompt is empty."
+  printf '%s' "$prompt_text"
 }
 
 # The first run creates a new Codex session, so this is where workdir selection,
@@ -281,28 +391,11 @@ run_initial_exec() {
   local exit_code
   local cmd=("$CODEX_BIN" "exec" "--json" "-o" "$LAST_MESSAGE_FILE")
 
-  if [[ "$DANGEROUSLY_BYPASS" == "1" ]]; then
-    cmd+=("--dangerously-bypass-approvals-and-sandbox")
-  elif [[ "$USE_FULL_AUTO" == "1" ]]; then
-    cmd+=("--full-auto")
-  fi
-
-  if [[ "$SKIP_GIT_REPO_CHECK" == "1" ]]; then
-    cmd+=("--skip-git-repo-check")
-  fi
-
-  if [[ -n "$MODEL" ]]; then
-    cmd+=("-m" "$MODEL")
-  fi
-
-  if [[ -n "$PROFILE" ]]; then
-    cmd+=("--profile" "$PROFILE")
-  fi
-
+  append_common_exec_args cmd
   cmd+=("-C" "$WORKDIR" "$prompt_payload")
 
   log "starting initial codex exec"
-  if "${cmd[@]}" >>"$EVENT_LOG_FILE" 2>>"$RUN_LOG_FILE"; then
+  if run_logged_command "" "${cmd[@]}"; then
     return 0
   else
     exit_code=$?
@@ -319,32 +412,12 @@ run_resume_exec() {
   local exit_code
   local cmd=("$CODEX_BIN" "exec" "resume" "--json" "-o" "$LAST_MESSAGE_FILE")
 
-  if [[ "$DANGEROUSLY_BYPASS" == "1" ]]; then
-    cmd+=("--dangerously-bypass-approvals-and-sandbox")
-  elif [[ "$USE_FULL_AUTO" == "1" ]]; then
-    cmd+=("--full-auto")
-  fi
-
-  # If git-repo checks are skipped only on the initial run but not on resume, the
-  # supervisor can end up retrying forever while the underlying task never progresses.
-  if [[ "$SKIP_GIT_REPO_CHECK" == "1" ]]; then
-    cmd+=("--skip-git-repo-check")
-  fi
-
-  if [[ -n "$MODEL" ]]; then
-    cmd+=("-m" "$MODEL")
-  fi
-
-  if [[ -n "$PROFILE" ]]; then
-    cmd+=("--profile" "$PROFILE")
-  fi
-
+  append_common_exec_args cmd
   if [[ -n "$CODEX_SESSION_ID" ]]; then
     cmd+=("$CODEX_SESSION_ID")
   else
     cmd+=("--last")
   fi
-
   cmd+=("$prompt_payload")
 
   if [[ -n "$CODEX_SESSION_ID" ]]; then
@@ -353,10 +426,7 @@ run_resume_exec() {
     log "resuming codex with --last in workdir=$WORKDIR"
   fi
 
-  if (
-    cd "$WORKDIR"
-    "${cmd[@]}"
-  ) >>"$EVENT_LOG_FILE" 2>>"$RUN_LOG_FILE"; then
+  if run_logged_command "$WORKDIR" "${cmd[@]}"; then
     return 0
   else
     exit_code=$?
@@ -376,13 +446,22 @@ main() {
   local exit_code=0
 
   parse_args "$@"
+  trap handle_sigterm TERM
+  trap handle_sigint INT
+  trap handle_sighup HUP
   command_exists "$CODEX_BIN" || die "Codex binary not found: $CODEX_BIN"
   [[ -d "$WORKDIR" ]] || die "WORKDIR does not exist: $WORKDIR"
   WORKDIR=$(cd "$WORKDIR" && pwd)
 
   prepare_state_dir
   load_previous_session_state
-  generate_completion_nonce
+  if [[ -n "$PROMPT_SOURCE" ]]; then
+    CODEX_SESSION_ID=
+    rm -f "$SESSION_ID_FILE"
+  elif [[ "$RESUME_WITH_LAST" == "1" ]]; then
+    CODEX_SESSION_ID=
+  fi
+  generate_completion_token
   write_state_metadata
 
   if [[ -n "$CODEX_SESSION_ID" ]]; then
@@ -392,21 +471,17 @@ main() {
   resume_prompt_payload=$(build_resume_prompt)
   printf '%s\n' "$resume_prompt_payload" > "$RESUME_PROMPT_FILE"
 
-  if [[ -z "$CODEX_SESSION_ID" ]]; then
+  if [[ -n "$PROMPT_SOURCE" ]]; then
     initial_prompt=$(read_initial_prompt "$PROMPT_SOURCE")
     initial_prompt_payload=$(build_initial_prompt "$initial_prompt")
-    printf '%s\n' "$initial_prompt_payload" > "$INITIAL_PROMPT_FILE"
-  else
-    START_WITH_RESUME=1
   fi
 
   log "state directory: $STATE_DIR"
   log "workdir: $WORKDIR"
-  log "completion nonce: $NONCE"
-  log "completion token: $DONE_TOKEN"
-  if [[ "$DANGEROUSLY_BYPASS" == "1" ]]; then
+  log "completion token: $COMPLETION_TOKEN"
+  if [[ "$EXECUTION_MODE" == "full-permission" ]]; then
     log "execution mode: full permission without approval prompts"
-  elif [[ "$USE_FULL_AUTO" == "1" ]]; then
+  elif [[ "$EXECUTION_MODE" == "full-auto" ]]; then
     log "execution mode: full auto"
   else
     log "execution mode: interactive approvals may be required"
@@ -415,7 +490,7 @@ main() {
   while true; do
     attempt=$((attempt + 1))
 
-    if (( attempt == 1 && START_WITH_RESUME == 0 )); then
+    if (( attempt == 1 )) && [[ -n "$PROMPT_SOURCE" ]]; then
       if run_initial_exec "$initial_prompt_payload"; then
         exit_code=0
       else
@@ -438,7 +513,6 @@ main() {
     fi
 
     print_last_message_preview
-
     log "attempt=$attempt finished with code=$exit_code without completion protocol; sleeping ${INTERVAL}s"
     sleep "$INTERVAL"
   done
