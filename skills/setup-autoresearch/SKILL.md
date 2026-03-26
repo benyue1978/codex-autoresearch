@@ -1,6 +1,6 @@
 ---
 name: setup-autoresearch
-description: Use when preparing autoresearch for a new repository, especially to inspect the repo, infer the operating constraints, ask only high-risk follow-up questions, and generate `program.md`
+description: Use when entering a new repository and needing a repo-specific autoresearch `program.md`, especially when the setup, measure, editable surface, or keep/discard contract must be inferred from the repo and clarified with only minimal high-risk questions
 ---
 
 # Setup Autoresearch
@@ -18,7 +18,19 @@ Produce only one artifact:
 Generate `program.md` only as output for the target repository.
 Do not create supporting docs for repo-specific rules unless the user explicitly asks for them.
 
-## Repo-First Workflow
+The `setup-autoresearch` step itself remains interactive. It should inspect the repo,
+ask the human only the necessary high-risk follow-up questions, and confirm the
+generated operating assumptions before finalizing `program.md`.
+
+This skill combines two patterns:
+
+- Inversion: inspect first, then ask the human only the minimum high-risk questions
+- Generator: produce one structured artifact, `program.md`, from the confirmed inputs
+
+See `references/program-template.md` for a generic reference template modeled after
+the original `karpathy/autoresearch` `program.md`, but generalized for arbitrary repos.
+
+## Input Gathering
 
 Inspect the current repo and infer as much as possible before asking the user anything.
 In other words: inspect the current repo and infer as much as possible.
@@ -69,6 +81,11 @@ Keep the questioning short and focused. Ask only what is needed to safely genera
 - Prefer `measure`, `result`, `evaluation signal`, or `authoritative result`.
 - If the repository itself uses `score`, you may quote that repo term when identifying a file, field, or command.
 
+## Generation
+
+After the repo inspection and human confirmation steps are complete, generate exactly
+one artifact: `program.md`.
+
 ## What `program.md` Must Contain
 
 The generated `program.md` should explain the overall autoresearch flow and be specific to the current repository.
@@ -90,30 +107,32 @@ It must cover:
 
 The generated `program.md` should make the loop concrete and operational:
 
-1. inspect the repo and identify the fixed setup, fixed measure, and smallest safe editable surface
-2. run any required setup
-3. establish a baseline result
-4. make one small change
-5. run the required verification checks
-6. run the experiment and obtain the authoritative measure
-7. compare the candidate against the current kept baseline
-8. if the measure improved or stayed the same with simpler logic, commit the change to git
-9. otherwise discard the change from git
-10. repeat with one experiment at a time
+1. begin autoresearch immediately
+2. inspect the repo and identify the fixed setup, fixed measure, and smallest safe editable surface
+3. run any required setup
+4. establish a baseline result
+5. make one small change
+6. run the required verification checks
+7. run the experiment and obtain the authoritative measure
+8. compare the candidate against the current kept baseline
+9. if the measure improved or stayed the same with simpler logic, commit the change to git
+10. otherwise discard the change from git
+11. continue autonomously until blocked by a real missing prerequisite, external dependency, or human decision that cannot be inferred safely
 
 The keep/discard operation must be explicit. Refer to git directly. Do not leave the operator guessing whether "keep" means commit, stash, or merely note the result.
 
-## Confirmation Gate
+## Setup Confirmation
 
-The generated `program.md` must instruct the operator to stop before starting autoresearch and ask the user whether to start autoresearch immediately or not.
+The interaction and confirmation happen during `setup-autoresearch`, not inside the generated `program.md`.
 
-That confirmation step must:
+That setup step must:
 
 - explain the inferred setup in a short summary
-- ask the user whether to start autoresearch immediately
+- confirm the inferred setup with the user before finalizing `program.md`
 - offer the alternative of using `codex-autoresearch.sh`
 - include a prompt like `read program.md and begin autoresearch`
-- happen before any setup, experiment, keep, or discard action begins
+
+The generated `program.md` should not stop to ask for confirmation before starting the loop. It should instruct the operator clearly to begin autoresearch immediately and continue autonomously.
 
 ## Output Discipline
 
