@@ -282,7 +282,7 @@ print_last_message_preview() {
   (( line_count > 0 )) || return 0
 
   log "codex says (last ${line_count} lines):"
-  tail -n "$line_count" "$LAST_MESSAGE_FILE" | while IFS= read -r line; do
+  tail -n "$line_count" "$LAST_MESSAGE_FILE" | while IFS= read -r line || [[ -n "$line" ]]; do
     printf '[%s]   %s\n' "$(date '+%F %T')" "$line" >&2
   done
 }

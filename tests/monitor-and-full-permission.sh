@@ -45,13 +45,7 @@ completion_token=$(printf '%s' "$prompt_payload" | awk -F'`' '/token `/ { print 
 confirm_text=$(printf '%s' "$prompt_payload" | awk -F'`' '/line 2 = `/ { print $4 }')
 
 if [[ "$call_count" == "1" ]]; then
-  cat > "$output_file" <<'MSG'
-alpha
-beta
-gamma
-delta
-epsilon
-MSG
+  printf 'alpha\nbeta\ngamma\ndelta\nepsilon-without-newline' > "$output_file"
 else
   printf '%s\n%s\n' "$completion_token" "$confirm_text" > "$output_file"
 fi
@@ -74,7 +68,7 @@ grep -q -- '--dangerously-bypass-approvals-and-sandbox' "$FAKE_LOG"
 grep -q 'codex says (last 3 lines):' "$STDERR_LOG"
 grep -q 'gamma' "$STDERR_LOG"
 grep -q 'delta' "$STDERR_LOG"
-grep -q 'epsilon' "$STDERR_LOG"
+grep -q 'epsilon-without-newline' "$STDERR_LOG"
 grep -qE '^exec --json ' "$FAKE_LOG"
 
 if grep -q -- '--full-auto' "$FAKE_LOG"; then
