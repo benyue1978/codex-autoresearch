@@ -15,6 +15,20 @@ Use `setup-autoresearch` when you are in a target repository and need to create 
 
 Use `codex-autoresearch.sh` either to start a new autoresearch session from a prompt, or to keep resuming an existing session with minimal supervision.
 
+## Install The Skill
+
+You can install the skill directly from this GitHub repository with `npx skills`:
+
+```bash
+npx skills add benyue1978/codex-autoresearch --skill setup-autoresearch
+```
+
+For Codex specifically, install it to the Codex skill directory:
+
+```bash
+npx skills add benyue1978/codex-autoresearch --skill setup-autoresearch -a codex
+```
+
 ## Using The Skill
 
 The skill is meant to be available to Codex in the target repository. Once available, ask Codex to use `setup-autoresearch`.
