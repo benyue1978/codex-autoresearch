@@ -26,6 +26,7 @@ SKIP_GIT_REPO_CHECK=${SKIP_GIT_REPO_CHECK:-0}
 START_WITH_RESUME_IF_POSSIBLE=${START_WITH_RESUME_IF_POSSIBLE:-1}
 MONITOR_LINES=${MONITOR_LINES:-3}
 EXECUTION_MODE=${EXECUTION_MODE:-}
+RATE_LIMIT_RETRY_DELAY=${RATE_LIMIT_RETRY_DELAY:-300}
 
 CODEX_SESSION_ID=${CODEX_SESSION_ID:-}
 COMPLETION_TOKEN=
@@ -320,6 +321,86 @@ write_state_metadata() {
   } > "$META_FILE"
 }
 
+detect_rate_limit_backoff() {
+  local recent_events
+  local recent_log
+  local reset_times
+  local now_epoch
+  local today
+  local reset_time
+  local candidate_epoch
+  local delay
+  local best_delay=
+  local best_reset=
+
+  recent_events=
+  recent_log=
+  if [[ -f "$EVENT_LOG_FILE" ]]; then
+    recent_events=$(tail -n 120 "$EVENT_LOG_FILE" 2>/dev/null || true)
+  fi
+  if [[ -f "$RUN_LOG_FILE" ]]; then
+    recent_log=$(tail -n 80 "$RUN_LOG_FILE" 2>/dev/null || true)
+  fi
+  [[ -n "$recent_events$recent_log" ]] || return 1
+
+  reset_times=$(
+    {
+      printf '%s\n' "$recent_events" | grep -Eo 'try again at [0-9]{1,2}:[0-9]{2} [AP]M' | sed 's/^try again at //'
+      printf '%s\n' "$recent_log" | grep -Eo '0% left \(resets [0-9]{2}:[0-9]{2}\)' | grep -Eo '[0-9]{2}:[0-9]{2}'
+    } || true
+  )
+  if [[ -n "$reset_times" ]]; then
+    now_epoch=${NOW_EPOCH:-$(date +%s)}
+    today=$(date -d "@$now_epoch" '+%F')
+
+    while IFS= read -r reset_time; do
+      [[ -n "$reset_time" ]] || continue
+      candidate_epoch=$(date -d "$today $reset_time" +%s 2>/dev/null || true)
+      [[ -n "$candidate_epoch" ]] || continue
+      if (( candidate_epoch <= now_epoch )); then
+        candidate_epoch=$(date -d "$today $reset_time +1 day" +%s 2>/dev/null || true)
+        [[ -n "$candidate_epoch" ]] || continue
+      fi
+
+      delay=$((candidate_epoch - now_epoch))
+      if [[ -z "$best_delay" || "$delay" -lt "$best_delay" ]]; then
+        best_delay=$delay
+        best_reset=$reset_time
+      fi
+    done <<< "$reset_times"
+
+    if [[ -n "$best_delay" ]]; then
+      printf '%s|%s\n' "$best_delay" "$best_reset"
+      return 0
+    fi
+  fi
+
+  if printf '%s\n%s\n' "$recent_events" "$recent_log" | grep -qiE "You've hit your usage limit|rate limits and credits|0% left|limit:"; then
+    printf '%s|\n' "$RATE_LIMIT_RETRY_DELAY"
+    return 0
+  fi
+
+  return 1
+}
+
+handle_rate_limit_backoff() {
+  local backoff_info
+  local delay
+  local reset_time
+
+  backoff_info=$(detect_rate_limit_backoff) || return 1
+  IFS='|' read -r delay reset_time <<< "$backoff_info"
+
+  if [[ -n "$reset_time" ]]; then
+    log "detected Codex usage limit; sleeping ${delay}s until ${reset_time} before retry"
+  else
+    log "detected Codex usage limit without reset time; sleeping ${delay}s before retry"
+  fi
+
+  sleep "$delay"
+  return 0
+}
+
 append_common_exec_args() {
   local -n cmd_ref=$1
 
@@ -510,6 +591,10 @@ main() {
     if completion_detected; then
       log "completion protocol detected; stopping supervisor"
       exit 0
+    fi
+
+    if (( exit_code != 0 )) && handle_rate_limit_backoff; then
+      continue
     fi
 
     print_last_message_preview

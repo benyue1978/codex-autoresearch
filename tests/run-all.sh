@@ -11,6 +11,8 @@ bash tests/prompt-and-resume-are-mutually-exclusive.sh
 bash tests/resume-flags-are-mutually-exclusive.sh
 bash tests/prompt-mode-ignores-stale-session-id.sh
 bash tests/stale-state-does-not-force-resume.sh
+bash tests/rate-limit-reset-backoff.sh
+bash tests/rate-limit-fallback-backoff.sh
 bash tests/monitor-and-full-permission.sh
 bash tests/resume-with-session-id.sh
 bash tests/termination-signal-is-explicit.sh
