@@ -1,34 +1,39 @@
 ---
 name: setup-autoresearch
-description: Use when entering a new repository and needing a repo-specific autoresearch `program.md`, especially when the setup, measure, editable surface, or keep/discard contract must be inferred from the repo and clarified with only minimal high-risk questions
+description: Use when entering a new repository and needing repo-specific autoresearch setup, especially when the setup, measure, editable surface, keep/discard contract, or minimal harness must be inferred from the repo and clarified with only minimal high-risk questions
 ---
 
 # Setup Autoresearch
 
-Use this skill to generate a repo-specific `program.md` for the current repository.
+Use this skill to set up repo-specific autoresearch for the current repository.
 
 The reference model is the original [`karpathy/autoresearch`](https://github.com/karpathy/autoresearch): keep the control surface simple, keep the measurement harness fixed, and make the human-authored `program.md` the main operating prompt.
 
 ## Goal
 
-Produce only one artifact:
+Produce:
 
 - `program.md`
+- and, when the repository lacks a usable autoresearch harness, the minimum supporting scripts and TSV ledger needed to run the loop reliably
 
-Generate `program.md` only as output for the target repository.
-Do not create supporting docs for repo-specific rules unless the user explicitly asks for them.
+Always generate `program.md` as output for the target repository.
+Create supporting scripts or a TSV ledger only when they are missing and the repo does not already provide an equivalent harness.
+Do not create extra repo-specific docs unless the user explicitly asks for them.
 
 The `setup-autoresearch` step itself remains interactive. It should inspect the repo,
 ask the human only the necessary high-risk follow-up questions, and confirm the
-generated operating assumptions before finalizing `program.md`.
+generated operating assumptions and any proposed scaffold files before writing them.
 
 This skill combines two patterns:
 
 - Inversion: inspect first, then ask the human only the minimum high-risk questions
-- Generator: produce one structured artifact, `program.md`, from the confirmed inputs
+- Generator: produce one structured setup package from the confirmed inputs, always centered on `program.md`
 
 See `references/program-template.md` for a generic reference template modeled after
 the original `karpathy/autoresearch` `program.md`, but generalized for arbitrary repos.
+See `references/harness-scripts.md` for a generic reference pattern for runtime harness roles.
+See `references/results-tsv-schema.md` for the ledger contract.
+See the script templates in `references/` for concrete scaffold contracts.
 
 ## Input Gathering
 
@@ -53,6 +58,9 @@ From the repo, infer:
 - fixed infrastructure that should remain stable
 - required verification commands
 - experiment logging location, if one is obvious
+- whether the repo already has harness scripts for experiment start, measurement, git keep/discard, or result logging
+- whether a result ledger already exists, preferably TSV
+- which missing pieces must be scaffolded so the loop can run reproducibly
 
 ## Follow-Up Questions
 
@@ -73,7 +81,7 @@ Bad reasons to ask:
 - low-impact preferences that do not change the loop design
 - curiosity
 
-Keep the questioning short and focused. Ask only what is needed to safely generate `program.md`.
+Keep the questioning short and focused. Ask only what is needed to safely generate `program.md` and any missing harness pieces.
 
 ## Language Rules
 
@@ -83,8 +91,10 @@ Keep the questioning short and focused. Ask only what is needed to safely genera
 
 ## Generation
 
-After the repo inspection and human confirmation steps are complete, generate exactly
-one artifact: `program.md`.
+After the repo inspection and human confirmation steps are complete, generate:
+
+- `program.md`
+- and only the missing harness pieces needed for the repo to execute the autoresearch loop reliably
 
 ## What `program.md` Must Contain
 
@@ -102,6 +112,8 @@ It must cover:
 8. required tests or verification gates
 9. any repo-specific logging or result ledger
 10. the simplicity bias
+11. preferred harness scripts, if the repo already has them or should add them
+12. the result ledger path, preferably TSV
 
 ## Autoresearch Flow
 
@@ -112,14 +124,37 @@ The generated `program.md` should make the loop concrete and operational:
 3. run any required setup
 4. establish a baseline result
 5. make one small change
-6. run the required verification checks
-7. run the experiment and obtain the authoritative measure
-8. compare the candidate against the current kept baseline
-9. if the measure improved or stayed the same with simpler logic, commit the change to git
-10. otherwise discard the change from git
-11. continue autonomously until blocked by a real missing prerequisite, external dependency, or human decision that cannot be inferred safely
+6. create an experiment commit before running the authoritative experiment
+7. run the required verification checks
+8. run the experiment and obtain the authoritative measure
+9. append the experiment result to the repo's result ledger, preferably a TSV, including at least experiment id, commit id, measure, and status
+10. compare the candidate against the current kept baseline
+11. if the measure improved or stayed the same with simpler logic, keep the experiment commit
+12. otherwise discard it by resetting git back to the previously kept commit or known baseline
+13. continue autonomously until blocked by a real missing prerequisite, external dependency, or human decision that cannot be inferred safely
 
-The keep/discard operation must be explicit. Refer to git directly. Do not leave the operator guessing whether "keep" means commit, stash, or merely note the result.
+The keep/discard operation must be explicit and upstream-style:
+
+- create a git commit for the candidate before the authoritative experiment runs
+- record the experiment in the result ledger whether it is later kept, discarded, or crashes
+- keep means preserving that experiment commit as the new baseline
+- discard means resetting git back to the previously kept state, not leaving a dirty worktree
+
+Do not leave the operator guessing whether "keep" means commit, stash, or merely note the result.
+
+## Harness Preference
+
+When the repository already has suitable harness scripts, the generated `program.md` should direct the agent to use them instead of open-coded ad hoc shell sequences.
+
+When the repository does not yet have a good harness, `setup-autoresearch` should propose and then generate the thinnest possible scaffold for:
+
+- starting one experiment from the current committed candidate
+- obtaining the authoritative measure from the canonical artifact
+- appending one row to the result ledger, preferably TSV
+- keeping the current experiment commit as the new baseline
+- discarding the current experiment commit by resetting to the prior kept state
+
+Prefer reusing existing repo commands and artifacts. The scaffold should wrap the repo's established workflow, not invent a new training or evaluation pipeline.
 
 ## Setup Confirmation
 
@@ -128,7 +163,8 @@ The interaction and confirmation happen during `setup-autoresearch`, not inside 
 That setup step must:
 
 - explain the inferred setup in a short summary
-- confirm the inferred setup with the user before finalizing `program.md`
+- explain whether the repo already has a usable harness or needs scaffold files
+- confirm the inferred setup and any proposed scaffold files with the user before writing them
 - offer the alternative of using `codex-autoresearch.sh`
 - include a prompt like `read program.md and begin autoresearch`
 
@@ -137,6 +173,7 @@ The generated `program.md` should not stop to ask for confirmation before starti
 ## Output Discipline
 
 - Write `program.md` only after repo inspection and any necessary follow-up questions.
+- Only generate harness scripts or a TSV ledger when the repo lacks an equivalent mechanism.
 - Keep it concise and operational.
 - Prefer explicit commands and file paths over abstract guidance.
 - Keep the editable surface as small as the repo allows.
